@@ -1,0 +1,131 @@
+---
+# roles/k8s_master/tasks/main.yml
+
+- name: Check if k0s controller is already initialized
+  ansible.builtin.stat:
+    path: /etc/k0s/k0s.yaml
+  register: k0s_master_init_check
+  become: true
+
+- name: Create k0s config directory
+  ansible.builtin.file:
+    path: /etc/k0s
+    state: directory
+    mode: "0755"
+  become: true
+
+- name: Generate default k0s config
+  ansible.builtin.command:
+    cmd: k0s config create
+  register: k0s_master_config_raw
+  changed_when: false
+  become: true
+
+- name: Write k0s config
+  ansible.builtin.copy:
+    content: "{{ k0s_master_config_raw.stdout }}"
+    dest: /etc/k0s/k0s.yaml
+    mode: "0600"
+  when: not k0s_master_init_check.stat.exists
+  become: true
+
+- name: Install and start k0s controller
+  ansible.builtin.command:
+    cmd: >-
+      k0s install controller
+      --single=false
+      -c /etc/k0s/k0s.yaml
+    creates: /etc/systemd/system/k0scontroller.service
+  become: true
+
+- name: Start k0s controller service
+  ansible.builtin.systemd:
+    name: k0scontroller
+    state: started
+    enabled: true
+    daemon_reload: true
+  become: true
+
+- name: Wait for k0s API to be ready
+  ansible.builtin.wait_for:
+    host: "{{ ansible_default_ipv4.address }}"
+    port: 6443
+    delay: 10
+    timeout: 180
+  become: true
+
+# ── kubectl symlink ──────────────────────────────────────────────────────────
+- name: Create kubectl symlink for k0s
+  ansible.builtin.file:
+    src: /usr/local/bin/k0s
+    dest: /usr/local/bin/kubectl
+    state: link
+  become: true
+
+# ── kubeconfig ────────────────────────────────────────────────────────────────
+- name: Create .kube directory for ansible_user
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.kube"
+    state: directory
+    owner: "{{ ansible_user }}"
+    mode: "0755"
+  become: true
+
+- name: Export kubeconfig
+  ansible.builtin.shell:
+    cmd: "k0s kubeconfig admin > /home/{{ ansible_user }}/.kube/config"
+    executable: /bin/bash
+  become: true
+  become_user: root
+  changed_when: true
+
+- name: Set kubeconfig ownership
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.kube/config"
+    owner: "{{ ansible_user }}"
+    mode: "0600"
+  become: true
+  become_user: root
+
+# ── Join token ────────────────────────────────────────────────────────────────
+- name: Generate worker join token
+  ansible.builtin.command:
+    cmd: k0s token create --role=worker
+  register: k0s_master_join_token_raw
+  changed_when: false
+  become: true
+  become_user: root
+
+- name: Save join token to file
+  ansible.builtin.copy:
+    content: "{{ k0s_master_join_token_raw.stdout }}"
+    dest: /tmp/join_token
+    mode: '0644'
+  become: true
+
+- name: Debug token (optional)
+  ansible.builtin.debug:
+    msg: "Join token: {{ k0s_master_join_token_raw.stdout }}"
+
+- name: Store join token as fact
+  ansible.builtin.set_fact:
+    k0s_join_token: "{{ k0s_master_join_token_raw.stdout }}"
+
+- name: Debug token (k0s_join_token)
+  ansible.builtin.debug:
+    msg: "Join token: {{ k0s_join_token }}"
+
+
+# ── Fetch kubeconfig locally ──────────────────────────────────────────────────
+- name: Fetch kubeconfig to CI workspace
+  ansible.builtin.fetch:
+    src: "/home/{{ ansible_user }}/.kube/config"
+    dest: "{{ playbook_dir }}/../kubeconfig"
+    flat: true
+  become: true
+
+- name: Show kubeconfig server address
+  ansible.builtin.command:
+    cmd: "grep server /home/{{ ansible_user }}/.kube/config"
+  changed_when: false
+  become: true

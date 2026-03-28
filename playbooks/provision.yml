@@ -1,0 +1,158 @@
+---
+# playbooks/provision.yml
+# Creates VPC, subnets, security groups, and 3 EC2 instances
+
+- name: Provision AWS infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+
+    # ── VPC ──────────────────────────────────────────────────────────────────
+    - name: Create VPC
+      amazon.aws.ec2_vpc_net:
+        name: "{{ cluster_name }}-vpc"
+        cidr_block: "{{ vpc_cidr }}"
+        region: "{{ aws_region }}"
+        tags: "{{ common_tags | combine({'Name': cluster_name + '-vpc'}) }}"
+      register: vpc
+
+    - name: Create public subnet
+      amazon.aws.ec2_vpc_subnet:
+        vpc_id: "{{ vpc.vpc.id }}"
+        cidr: "{{ subnet_cidr }}"
+        az: "{{ availability_zone }}"
+        map_public: true
+        region: "{{ aws_region }}"
+        tags: "{{ common_tags | combine({'Name': cluster_name + '-subnet'}) }}"
+      register: subnet
+
+    - name: Create Internet Gateway
+      amazon.aws.ec2_vpc_igw:
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: "{{ aws_region }}"
+        tags: "{{ common_tags | combine({'Name': cluster_name + '-igw'}) }}"
+      register: igw
+
+    - name: Configure route table
+      amazon.aws.ec2_vpc_route_table:
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: "{{ aws_region }}"
+        subnets:
+          - "{{ subnet.subnet.id }}"
+        routes:
+          - dest: "0.0.0.0/0"
+            gateway_id: "{{ igw.gateway_id }}"
+        tags: "{{ common_tags | combine({'Name': cluster_name + '-rt'}) }}"
+
+    # ── Security Group ────────────────────────────────────────────────────────
+    - name: Create k8s security group
+      amazon.aws.ec2_security_group:
+        name: "{{ cluster_name }}-sg"
+        description: "Kubernetes cluster nodes"
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: "{{ aws_region }}"
+        rules:
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ip: "0.0.0.0/0"
+            rule_desc: "SSH"
+          - proto: tcp
+            from_port: 6443
+            to_port: 6443
+            cidr_ip: "0.0.0.0/0"
+            rule_desc: "K8s API server"
+          - proto: tcp
+            from_port: 2379
+            to_port: 2380
+            cidr_ip: "{{ vpc_cidr }}"
+            rule_desc: "etcd"
+          - proto: tcp
+            from_port: 10250
+            to_port: 10259
+            cidr_ip: "{{ vpc_cidr }}"
+            rule_desc: "kubelet/kube-scheduler/controller-manager"
+          - proto: tcp
+            from_port: 30000
+            to_port: 32767
+            cidr_ip: "0.0.0.0/0"
+            rule_desc: "NodePort services"
+          - proto: all
+            cidr_ip: "{{ vpc_cidr }}"
+            rule_desc: "Internal VPC / pod traffic"
+        rules_egress:
+          - proto: all
+            cidr_ip: "0.0.0.0/0"
+        tags: "{{ common_tags | combine({'Name': cluster_name + '-sg'}) }}"
+      register: sg
+
+    # ── Master ────────────────────────────────────────────────────────────────
+    - name: Launch master node
+      amazon.aws.ec2_instance:
+        name: "{{ cluster_name }}-master"
+        key_name: "{{ aws_key_pair }}"
+        instance_type: "{{ ec2_instance_type }}"
+        image_id: "{{ ec2_ami_id }}"
+        region: "{{ aws_region }}"
+        vpc_subnet_id: "{{ subnet.subnet.id }}"
+        security_group: "{{ sg.group_id }}"
+        network:
+          assign_public_ip: true
+        volumes:
+          - device_name: /dev/sda1
+            ebs:
+              volume_size: "{{ ec2_volume_size }}"
+              volume_type: "{{ ec2_volume_type }}"
+              delete_on_termination: true
+        tags: "{{ common_tags | combine({'Name': cluster_name + '-master', 'Role': 'master'}) }}"
+        wait: true
+        state: running
+      register: master_instance
+
+    # ── Workers ───────────────────────────────────────────────────────────────
+    - name: Launch worker nodes
+      amazon.aws.ec2_instance:
+        name: "{{ cluster_name }}-worker{{ item }}"
+        key_name: "{{ aws_key_pair }}"
+        instance_type: "{{ ec2_instance_type }}"
+        image_id: "{{ ec2_ami_id }}"
+        region: "{{ aws_region }}"
+        vpc_subnet_id: "{{ subnet.subnet.id }}"
+        security_group: "{{ sg.group_id }}"
+        network:
+          assign_public_ip: true
+        volumes:
+          - device_name: /dev/sda1
+            ebs:
+              volume_size: "{{ ec2_volume_size }}"
+              volume_type: "{{ ec2_volume_type }}"
+              delete_on_termination: true
+        tags: "{{ common_tags | combine({'Name': cluster_name + '-worker' + item|string, 'Role': 'worker'}) }}"
+        wait: true
+        state: running
+      loop: [1, 2]
+      register: worker_instances
+
+    - name: Wait for SSH on all nodes
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: 22
+        delay: 10
+        timeout: 300
+      loop: >-
+        {{ [master_instance.instances[0].public_ip_address] +
+           (worker_instances.results
+            | map(attribute='instances') | flatten
+            | map(attribute='public_ip_address') | list) }}
+
+    - name: Print instance summary
+      ansible.builtin.debug:
+        msg:
+          - "Master  IP : {{ master_instance.instances[0].public_ip_address }}"
+          - "Worker IPs : {{ worker_instances.results
+              | map(attribute='instances') | flatten
+              | map(attribute='public_ip_address') | list }}"

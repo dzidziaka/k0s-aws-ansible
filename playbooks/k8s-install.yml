@@ -1,0 +1,31 @@
+---
+- name: Configure all Kubernetes nodes
+  hosts: k8s_all
+  remote_user: ubuntu
+  become: true
+  gather_facts: true
+  roles:
+    - k8s_common
+
+- name: Bootstrap k0s controller
+  hosts: k8s_master
+  remote_user: ubuntu
+  become: true
+  gather_facts: true
+  vars:
+    k0s_config: |
+      apiVersion: k0s.k0sproject.io/v1beta1
+      metadata:
+        name: k0s
+      spec:
+        api:
+          extraArgs:
+            authorization-mode: Node,RBAC
+        storage:
+          type: etcd
+        network:
+          provider: calico
+      
+  roles:
+    - k8s_controller
+  

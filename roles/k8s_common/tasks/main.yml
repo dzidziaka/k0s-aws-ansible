@@ -1,0 +1,85 @@
+---
+# roles/k8s_common/tasks/main.yml
+# Applied to ALL k0s nodes (controller + workers)
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  
+
+- name: Install prerequisite packages
+  ansible.builtin.apt:
+    name:
+      - curl
+      - ca-certificates
+      - nfs-common
+      - open-iscsi
+    state: present
+  become: true
+  
+
+# ── Swap ──────────────────────────────────────────────────────────────────────
+- name: Disable swap immediately
+  ansible.builtin.command: swapoff -a
+  changed_when: false
+  become: true
+
+- name: Disable swap in /etc/fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#].*\s+swap\s+.*)$'
+    replace: '# \1'
+  become: true
+
+# ── Kernel modules ────────────────────────────────────────────────────────────
+- name: Load required kernel modules
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+    persistent: present
+  loop:
+    - overlay
+    - br_netfilter
+  become: true
+
+- name: Set sysctl parameters for Kubernetes
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: true
+  loop:
+    - key: "net.bridge.bridge-nf-call-iptables"
+      value: "1"
+    - key: "net.bridge.bridge-nf-call-ip6tables"
+      value: "1"
+    - key: "net.ipv4.ip_forward"
+      value: "1"
+  become: true
+
+# ── k0s binary ────────────────────────────────────────────────────────────────
+- name: Download k0s installer script
+  ansible.builtin.get_url:
+    url: "https://get.k0s.sh"
+    dest: "/tmp/install_k0s.sh"
+    mode: "0755"
+  become: true
+
+- name: Install k0s binary
+  ansible.builtin.command:
+    cmd: "/tmp/install_k0s.sh"
+    creates: "/usr/local/bin/k0s"
+  environment:
+    K0S_VERSION: "{{ k0s_version }}"
+  become: true
+
+- name: Verify k0s binary
+  ansible.builtin.command: k0s version
+  changed_when: false
+  register: k0s_ver_out
+
+- name: Show k0s version
+  ansible.builtin.debug:
+    msg: "{{ k0s_ver_out.stdout }}"

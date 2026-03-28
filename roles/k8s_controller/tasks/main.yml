@@ -1,0 +1,101 @@
+---
+- name: Create k0s config directory
+  file:
+    path: /etc/k0s
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Generate k0s config
+  copy:
+    content: |
+      apiVersion: k0s.k0sproject.io/v1beta1
+      metadata:
+        name: k0s
+      spec:
+        api:
+          extraArgs:
+            authorization-mode: Node,RBAC
+        storage:
+          type: etcd
+        network:
+          provider: calico
+    dest: /etc/k0s/k0s.yaml
+    mode: '0600'
+  become: true
+
+- name: Install k0s controller
+  shell: |
+    k0s install controller -c /etc/k0s/k0s.yaml --enable-worker
+  args:
+    creates: /etc/systemd/system/k0scontroller.service
+
+- name: Enable and start k0s controller
+  systemd:
+    name: k0scontroller
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Wait for API server
+  wait_for:
+    port: 6443
+    host: "{{ ansible_default_ipv4.address }}"
+    delay: 30
+    timeout: 300
+
+- name: Wait for kubeconfig generation
+  wait_for:
+    path: /var/lib/k0s/pki/admin.conf
+    timeout: 60
+    state: present
+
+- name: Generate kubeconfig with k0s CLI
+  shell: |
+    sudo k0s kubeconfig admin > /tmp/admin.conf
+    sudo chmod 644 /tmp/admin.conf
+  become: true
+
+- name: Copy kubeconfig
+  fetch:
+    src: /tmp/admin.conf
+    dest: "{{ playbook_dir }}/../kubeconfig"
+    flat: true
+  delegate_to: "{{ inventory_hostname }}"
+
+- name: Update inventory with master IP
+  lineinfile:
+    path: "{{ playbook_dir }}/../inventory/aws_ec2.yml"
+    regexp: '^k8s_master\s+ansible_host='
+    line: 'k8s_master: ansible_host={{ ansible_default_ipv4.address }}'
+  delegate_to: localhost
+
+- name: Generate worker join token
+  ansible.builtin.command:
+    cmd: k0s token create --role=worker
+  register: k0s_master_join_token_raw
+  changed_when: false
+  become: true
+  become_user: root
+
+- name: Save join token to file
+  ansible.builtin.copy:
+    content: "{{ k0s_master_join_token_raw.stdout }}"
+    dest: /tmp/join_token
+    mode: '0644'
+  become: true
+
+- name: Debug token (optional)
+  ansible.builtin.debug:
+    msg: "Join token: {{ k0s_master_join_token_raw.stdout }}"
+
+- name: Store join token as fact
+  ansible.builtin.set_fact:
+    k0s_join_token: "{{ k0s_master_join_token_raw.stdout }}"
+
+- name: Debug token (k0s_join_token)
+  ansible.builtin.debug:
+    msg: "Join token: {{ k0s_join_token }}"
+
+

@@ -1,0 +1,9 @@
+---
+- name: Join k0s workers
+  hosts: k8s_workers
+  remote_user: ubuntu
+  become: true
+
+  roles:
+    - k8s_worker
+  

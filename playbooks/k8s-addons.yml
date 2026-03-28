@@ -1,0 +1,103 @@
+---
+# playbooks/k8s-addons.yml
+# Run after all workers have joined the cluster
+
+- name: Install cluster addons
+  hosts: k8s_master
+  gather_facts: false
+  become: true
+  remote_user: ubuntu
+
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+
+  tasks:
+
+    - name: Generate accessible kubeconfig
+      shell: |
+        sudo k0s kubeconfig admin > /home/ubuntu/admin.conf
+        sudo chown ubuntu:ubuntu /home/ubuntu/admin.conf
+        sudo chmod 600 /home/ubuntu/admin.conf
+      become: true
+
+    - name: Wait for nodes
+      shell: |
+        export KUBECONFIG=/home/ubuntu/admin.conf
+        k0s kubectl wait --for=condition=Ready nodes --all --timeout=600s
+      become_user: ubuntu
+      retries: 30
+      delay: 10
+      until: wait_result.rc == 0
+      register: wait_result
+      
+    - name: Print node status
+      shell: |
+        export KUBECONFIG=/home/ubuntu/admin.conf
+        k0s kubectl get nodes -o wide
+      changed_when: false
+      register: nodes_out
+
+    - name: Show nodes
+      ansible.builtin.debug:
+        msg: "{{ nodes_out.stdout_lines }}"
+
+    # ── k9s ─────────────────────────────────────────────────────────────────
+    - name: Get latest k9s version
+      ansible.builtin.uri:
+        url: https://api.github.com/repos/derailed/k9s/releases/latest
+        return_content: true
+      register: k9s_release
+      become: false
+
+    - name: Set k9s version fact
+      ansible.builtin.set_fact:
+        k9s_version: "{{ k9s_release.json.tag_name }}"
+
+    - name: Download k9s
+      ansible.builtin.get_url:
+        url: "https://github.com/derailed/k9s/releases/download/{{ k9s_version }}/k9s_Linux_amd64.tar.gz"
+        dest: "/tmp/k9s.tar.gz"
+        mode: "0644"
+      become: true
+
+    - name: Extract k9s to /tmp
+      ansible.builtin.unarchive:
+        src: /tmp/k9s.tar.gz
+        dest: /tmp
+        remote_src: true
+      become: true
+
+    - name: Install k9s to /usr/local/bin
+      ansible.builtin.command:
+        cmd: "install -m 0755 -o root -g root /tmp/k9s /usr/local/bin/k9s"
+      become: true
+      become_user: root
+
+    - name: Verify k9s installation
+      ansible.builtin.command: k9s version
+      changed_when: false
+      register: k9s_ver_out
+
+    - name: Show k9s version
+      ansible.builtin.debug:
+        msg: "{{ k9s_ver_out.stdout_lines }}"
+
+    # ── Metrics Server ──────────────────────────────────────────────────────
+    - name: Deploy Metrics Server with kubelet-insecure-tls
+      shell: |
+        export KUBECONFIG=/home/ubuntu/admin.conf
+        k0s kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+        k0s kubectl patch deployment metrics-server -n kube-system \
+            --type=json \
+            -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+      changed_when: true
+
+    - name: Wait for Metrics Server to be ready
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/ubuntu/admin.conf
+        k0s kubectl rollout status deployment/metrics-server -n kube-system --timeout=180s
+      changed_when: false
+      retries: 5
+      delay: 20
+      register: k8s_metrics_result
+      until: k8s_metrics_result.rc == 0

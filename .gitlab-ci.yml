@@ -1,0 +1,149 @@
+---
+# .gitlab-ci.yml
+# GitLab CI/CD - Kubernetes on AWS with Ansible
+
+image: python:3.11-slim
+
+stages:
+  - validate
+  - provision
+  - deploy
+  - verify
+  - destroy
+
+variables:
+  DEBIAN_FRONTEND: "noninteractive"
+  DEBCONF_NOWARNINGS: "yes"
+  ANSIBLE_HOST_KEY_CHECKING: "False"
+  ANSIBLE_FORCE_COLOR: "true"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PIP_NO_COLOR: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  ANSIBLE_COLLECTIONS_PATH: "$CI_PROJECT_DIR/.ansible/collections"
+  CLUSTER_NAME: "k8s-cluster"
+
+cache:
+  key: ansible-${CI_COMMIT_REF_SLUG}
+  paths:
+    - .cache/pip
+    - .ansible/collections
+
+default:
+  before_script:
+    - export DEBIAN_FRONTEND=noninteractive
+    - chmod 755 "$CI_PROJECT_DIR"
+    - apt-get update -qq -o Dpkg::Use-Pty=0
+    - apt-get install -y -qq -o Dpkg::Use-Pty=0 openssh-client rsync ca-certificates git
+    - pip install --quiet --no-color ansible boto3 botocore
+    - ansible-galaxy collection install -r requirements.yml --collections-path "$ANSIBLE_COLLECTIONS_PATH" 2>&1 | grep -v "^\[WARNING\]" || true
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - cp "$SSH_PRIVATE_KEY"  ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H gitlab.lan >> ~/.ssh/known_hosts 2>/dev/null || true
+    - pwd
+    - ansible --version
+    - mkdir -p /etc/ssl/certs && echo "/etc/ssl/certs/gitlab.lan.crt" > /etc/ssl/certs/gitlab.lan.crt
+    - git config --global http.sslCAInfo /etc/ssl/certs/gitlab.lan.crt
+# validate
+
+lint:
+  stage: validate
+  allow_failure: true
+  variables:
+    ANSIBLE_VAULT_PASSWORD_FILE: "/dev/null"
+  script:
+    - pip install --quiet --no-color yamllint ansible-lint
+    - yamllint -c .yamllint.yml .
+    - ansible-lint playbooks/ roles/
+
+syntax-check:
+  stage: validate
+  script:
+    - ansible-playbook --syntax-check playbooks/provision.yml
+    - ansible-playbook --syntax-check -i inventory/aws_ec2.yml playbooks/k8s-install.yml
+    - ansible-playbook --syntax-check -i inventory/aws_ec2.yml playbooks/k8s-join.yml
+    - ansible-playbook --syntax-check -i inventory/aws_ec2.yml playbooks/verify.yml
+
+# provision
+
+provision-ec2:
+  stage: provision
+  needs:
+    - syntax-check
+  environment:
+    name: production
+    action: prepare
+  script:
+    - ansible-playbook playbooks/provision.yml -e "cluster_name=${CLUSTER_NAME}" -e "aws_key_pair=${AWS_KEY_PAIR_NAME}"
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^(main|master|k0s)$/'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - when: never
+
+# deploy
+
+install-kubernetes:
+  stage: deploy
+  needs:
+    - provision-ec2
+  environment:
+    name: production
+    action: start
+  script:
+    - ansible-playbook playbooks/k8s-install.yml -i inventory/aws_ec2.yml -e "cluster_name=${CLUSTER_NAME}"
+  artifacts:
+    paths:
+      - kubeconfig
+    expire_in: 30 days
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^(main|master|k0s)$/'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - when: never
+
+join-workers:
+  stage: deploy
+  needs:
+    - install-kubernetes
+  script:
+    - ansible-playbook playbooks/k8s-join.yml -i inventory/aws_ec2.yml
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^(main|master|k0s)$/'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - when: never
+
+install-addons:
+  stage: deploy
+  needs:
+    - join-workers
+  script:
+    - ansible-playbook playbooks/k8s-addons.yml -i inventory/aws_ec2.yml
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^(main|master|k0s)$/'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - when: never
+
+# verify
+
+verify-cluster:
+  stage: verify
+  needs:
+    - install-addons
+  script:
+    - ansible-playbook playbooks/verify.yml -i inventory/aws_ec2.yml
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^(main|master|k0s)$/'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - when: never
+
+# destroy
+
+destroy-infrastructure:
+  stage: destroy
+  environment:
+    name: production
+    action: stop
+  script:
+    - ansible-playbook playbooks/destroy.yml -e "cluster_name=${CLUSTER_NAME}" -e "auto_approve=true"
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^(main|master|k0s)$/'
+      when: manual
+    - when: never

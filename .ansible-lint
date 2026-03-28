@@ -1,0 +1,10 @@
+---
+profile: min
+exclude_paths:
+  - .cache/
+  - .ansible/
+  - .facts_cache/
+skip_list:
+  - internal-error    # ansible-lint runs syntax-check with vault which fails on /dev/null
+warn_list:
+  - yaml[line-length]

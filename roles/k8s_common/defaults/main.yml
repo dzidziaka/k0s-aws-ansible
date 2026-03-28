@@ -1,0 +1,6 @@
+---
+# roles/k8s_common/defaults/main.yml
+
+k0s_version: "v1.29.3+k0s.0"
+k8s_pod_network_cidr: "192.168.0.0/16"
+k8s_service_cidr: "10.96.0.0/12"

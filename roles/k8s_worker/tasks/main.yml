@@ -1,0 +1,34 @@
+---
+- name: Get join token from controller
+  slurp:
+    src: /tmp/join_token
+  delegate_to: "{{ groups['k8s_master'][0] }}"
+  register: join_token
+  run_once: true
+
+- name: Copy join token to worker
+  copy:
+    content: "{{ join_token.content | b64decode }}"
+    dest: /tmp/worker-token
+    mode: "0600"
+  become: true
+
+- name: Check if k0sworker.service exists
+  stat:
+    path: /etc/systemd/system/k0sworker.service
+  register: k0sworker_service
+
+- name: Install k0s worker
+  shell: |
+    k0s install worker --token-file /tmp/worker-token
+  args:
+    creates: /etc/k0s/k0s-worker.yaml
+  become: true
+  when: not k0sworker_service.stat.exists
+
+- name: Enable k0sworker service
+  systemd:
+    name: k0sworker
+    state: started
+    enabled: true
+  become: true

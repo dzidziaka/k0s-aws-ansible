@@ -1,0 +1,85 @@
+# .gitea/workflows/deploy-k8s.yml
+
+name: Deploy k0s Cluster
+
+on:
+  push:
+    branches: [main, master, k0s, k0s-gitea, k0s-gitea-docker-ubuntu-with-packages]
+  workflow_dispatch:
+
+env:
+  CLUSTER_NAME: k8s-cluster
+
+defaults:
+  run:
+    shell: bash
+    working-directory: .
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest-custom
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup common environment
+        run: |
+          mkdir -p ~/.ssh .gitea/artifacts
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H gitlab.lan >> ~/.ssh/known_hosts 2>/dev/null || true
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          echo "AWS_DEFAULT_REGION=${{ secrets.AWS_DEFAULT_REGION }}" >> $GITHUB_ENV
+          echo "AWS_KEY_PAIR_NAME=${{ secrets.AWS_KEY_PAIR_NAME }}" >> $GITHUB_ENV
+      
+      - name: Validate
+        run: |
+          ansible-lint playbooks/ roles/
+          ansible-playbook --syntax-check playbooks/provision.yml
+          ansible-playbook --syntax-check -i inventory/aws_ec2.yml playbooks/k8s-install.yml
+          ansible-playbook --syntax-check -i inventory/aws_ec2.yml playbooks/k8s-join.yml
+      
+      - name: Provision EC2
+        run: ansible-playbook playbooks/provision.yml -e "cluster_name=${CLUSTER_NAME}"
+      
+      - name: Deploy Master
+        run: ansible-playbook playbooks/k8s-install.yml -i inventory/aws_ec2.yml -e "cluster_name=${CLUSTER_NAME}"
+      
+      - name: Persist kubeconfig
+        run: |
+          cp kubeconfig .gitea/artifacts/kubeconfig
+          MASTER_IP=$(grep "k8s_master" inventory/aws_ec2.yml | head -1 | awk '{print $3}' | cut -d'=' -f2)
+          sed -i "s|127.0.0.1:6443|$MASTER_IP:6443|g; s|localhost:6443|$MASTER_IP:6443|g" .gitea/artifacts/kubeconfig
+          echo inventory/aws_ec2.yml
+          cat inventory/aws_ec2.yml
+          echo .gitea/artifacts/kubeconfig
+          cat .gitea/artifacts/kubeconfig
+      
+      - name: Deploy Workers & Verify
+        run: |
+          ansible-playbook playbooks/k8s-join.yml -i inventory/aws_ec2.yml
+          
+      
+      - name: Install Addons
+        run: ansible-playbook playbooks/k8s-addons.yml -i inventory/aws_ec2.yml
+      
+      - name: Final Verification
+        run: |
+          ansible-playbook playbooks/verify.yml -i inventory/aws_ec2.yml
+
+  destroy:
+    runs-on: ubuntu-latest-custom
+    environment: 
+      name: production
+      action: stop
+    if: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+      - name: Destroy Infrastructure
+        run: ansible-playbook playbooks/destroy.yml -e "cluster_name=${CLUSTER_NAME}" -e "auto_approve=true"
