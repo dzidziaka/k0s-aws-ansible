@@ -50,10 +50,7 @@ jobs:
           cp kubeconfig .gitea/artifacts/kubeconfig
           MASTER_IP=$(grep "k8s_master" inventory/aws_ec2.yml | head -1 | awk '{print $3}' | cut -d'=' -f2)
           sed -i "s|127.0.0.1:6443|$MASTER_IP:6443|g; s|localhost:6443|$MASTER_IP:6443|g" .gitea/artifacts/kubeconfig
-          echo inventory/aws_ec2.yml
-          cat inventory/aws_ec2.yml
-          echo .gitea/artifacts/kubeconfig
-          cat .gitea/artifacts/kubeconfig
+          
       
       - name: Deploy Workers & Verify
         run: |
