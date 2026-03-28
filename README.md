@@ -1,4 +1,4 @@
-# Kubernetes on AWS — Ansible + GitLab CI/CD
+# Kubernetes k0s on AWS — Ansible + GitLab CI/CD
 
 Provisions **3 EC2 instances** (1 control-plane + 2 workers) and bootstraps a production-ready Kubernetes cluster using kubeadm and Calico CNI.
 
@@ -17,24 +17,25 @@ AWS Region (eu-west-1)
 
 ```
 .
-├── .gitlab-ci.yml              # GitLab pipeline (5 stages)
-├── .yamllint.yml               # Linting rules
-├── ansible.cfg                 # Ansible settings
-├── requirements.yml            # Collection dependencies
+|── .gitea/workflows/k0s-gitea-deploy.yml # Gitea actions 
+├── .gitlab-ci.yml                        # GitLab pipeline (5 stages)
+├── .yamllint.yml                         # Linting rules
+├── ansible.cfg                           # Ansible settings
+├── requirements.yml                      # Collection dependencies
 ├── group_vars/
-│   └── all.yml                 # Shared variables (versions, sizing, tags)
+│   └── all.yml                           # Shared variables (versions, sizing, tags)
 ├── inventory/
-│   └── aws_ec2.yml             # Dynamic EC2 inventory (amazon.aws plugin)
+│   └── aws_ec2.yml                       # Dynamic EC2 inventory (amazon.aws plugin)
 ├── playbooks/
-│   ├── provision.yml           # Create VPC + 3 EC2 instances
-│   ├── k8s-install.yml         # Install containerd + kubeadm on all nodes
-│   ├── k8s-join.yml            # Join workers to the cluster
-│   ├── verify.yml              # Health checks
-│   └── destroy.yml             # Tear down everything
+│   ├── provision.yml                     # Create VPC + 3 EC2 instances
+│   ├── k8s-install.yml                   # Install containerd + kubeadm on all nodes
+│   ├── k8s-join.yml                      # Join workers to the cluster
+│   ├── verify.yml                        # Health checks
+│   └── destroy.yml                       # Tear down everything
 └── roles/
-    ├── k8s_common/             # Applied to all nodes (kernel, swap, containerd, pkgs)
-    ├── k8s_master/             # kubeadm init, Calico CNI, kubeconfig
-    └── k8s_worker/             # kubeadm join
+    ├── k8s_common/                       # Applied to all nodes (kernel, swap, containerd, pkgs)
+    ├── k8s_master/                       # kubeadm init, Calico CNI, kubeconfig
+    └── k8s_worker/                       # kubeadm join
 ```
 
 ## Prerequisites

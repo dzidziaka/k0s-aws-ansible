@@ -1,4 +1,4 @@
-# .gitea/workflows/deploy-k8s.yml
+# .gitea/workflows/k0s-gitea-deploy.yml
 
 name: Deploy k0s Cluster
 
